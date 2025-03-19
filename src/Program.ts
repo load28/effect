@@ -1,53 +1,154 @@
-import { Context, Effect, Option } from "effect"
+import { Context, Effect } from "effect"
 
 type User = {
   id: number
   name: string
 }
 
+class UserRepositoryError extends Error {
+  readonly _tag = "UserRepositoryError"
+  constructor(message: string) {
+    super(`UserRepositoryError: ${message}`)
+    this.name = "UserRepositoryError"
+  }
+
+  static readonly NotFound = (id: number) => {
+    return new UserRepositoryError(`User with id ${id} not found`)
+  }
+}
+
+class LocalStorageError extends Error {
+  readonly _tag = "LocalStorageError"
+  constructor(message: string) {
+    super(`LocalStorageError: ${message}`)
+    this.name = "LocalStorageError"
+  }
+
+  static readonly parseError = (error: unknown) => {
+    if (error instanceof Error) {
+      return new LocalStorageError(error.message)
+    }
+
+    return new LocalStorageError("Unknown error")
+  }
+
+  static readonly stringifyError = (error: unknown) => {
+    if (error instanceof Error) {
+      return new LocalStorageError(error.message)
+    }
+
+    return new LocalStorageError("Unknown error")
+  }
+
+  static readonly NotFound = (key: string) => {
+    return new LocalStorageError(`LocalStorage key ${key} not found`)
+  }
+}
+
 class UserRepository extends Context.Tag("UserRepository")<
   UserRepository,
   {
-    findById: (id: number) => Effect.Effect<User>
-    findAll: () => Effect.Effect<Array<User>>
+    findById: (id: number) => Effect.Effect<User, UserRepositoryError>
+    findAll: () => Effect.Effect<Array<User>, UserRepositoryError>
   }
 >() {}
 
-class UserService extends Context.Tag("UserService")<
-  UserService,
+const users: Array<User> = [
+  { id: 1, name: "User 1" },
+  { id: 2, name: "User 2" }
+]
+
+class LocalStorageService extends Context.Tag("LocalStorageService")<
+  LocalStorageService,
   {
-    getUser: (id: number) => Effect.Effect<User>
+    getItem<T>(key: string): Effect.Effect<T, LocalStorageError>
+    setItem<T>(key: string, value: T): Effect.Effect<void, LocalStorageError>
+    removeItem(key: string): Effect.Effect<void, LocalStorageError>
   }
 >() {}
 
-const userRepositoryLive = UserRepository.of({
-  findById: (id) => Effect.succeed({ id, name: `User ${id}` }),
-  findAll: () =>
-    Effect.succeed([
-      { id: 1, name: "User 1" },
-      { id: 2, name: "User 2" }
-    ])
+const localStorageServiceLive = LocalStorageService.of({
+  getItem: <T>(key: string) =>
+    Effect.try<T, LocalStorageError>({
+      try: () => {
+        const item = localStorage.getItem(key)
+        if (!item) {
+          throw LocalStorageError.NotFound(key)
+        }
+
+        return JSON.parse(item) as T
+      },
+      catch: (error) => LocalStorageError.parseError(error)
+    }),
+  setItem: <T>(key: string, value: T) =>
+    Effect.try<void, LocalStorageError>({
+      try: () => {
+        const stringifiedValue = JSON.stringify(value)
+        localStorage.setItem(key, stringifiedValue)
+      },
+      catch: (error) => LocalStorageError.stringifyError(error)
+    }),
+  removeItem: (key: string) =>
+    Effect.try<void, LocalStorageError>({
+      try: () => localStorage.removeItem(key),
+      catch: (error) => LocalStorageError.parseError(error)
+    })
 })
 
-const userServiceLive = UserService.of({
-  getUser: (id) => Effect.succeed({ id, name: `User ${id}` })
+const userInmemoryRepositoryLive = UserRepository.of({
+  findAll: () => Effect.succeed(users),
+  findById: (id) => {
+    const user = users.find((user) => user.id === id)
+    if (!user) {
+      return Effect.fail(UserRepositoryError.NotFound(id))
+    }
+
+    return Effect.succeed(user)
+  }
 })
 
-const program = Effect.gen(function* () {
+const userLocalStorageRepositoryLive = UserRepository.of({
+  findById: (id) => {
+    return Effect.gen(function* () {
+      const localStorageService = yield* LocalStorageService
+      const users = yield* localStorageService
+        .getItem<Array<User>>("users")
+        .pipe(Effect.catchAll(() => Effect.succeed([])))
+
+      return users
+    }).pipe(
+      Effect.flatMap((users) => {
+        const user = users.find((user) => user.id === id)
+        if (!user) {
+          return Effect.fail(UserRepositoryError.NotFound(id))
+        }
+        return Effect.succeed(user)
+      }),
+      Effect.provideService(LocalStorageService, localStorageServiceLive)
+    )
+  },
+  findAll: () => {
+    return Effect.gen(function* () {
+      const localStorageService = yield* LocalStorageService
+      const users = yield* localStorageService
+        .getItem<Array<User>>("users")
+        .pipe(Effect.catchAll(() => Effect.succeed([])))
+
+      return users
+    }).pipe(Effect.provideService(LocalStorageService, localStorageServiceLive))
+  }
+})
+
+const main = Effect.gen(function* () {
   const userRepository = yield* UserRepository
-  const userService = yield* Effect.serviceOption(UserService)
 
-  const user = Option.isNone(userService)
-    ? yield* Effect.succeed({ id: 1, name: "Optional User" })
-    : yield* userRepository.findById(1)
-  console.log("userService", user)
-  const user2 = yield* userRepository.findById(2)
-  console.log("userRepository", user2)
+  const user1 = yield* userRepository
+    .findById(1)
+    .pipe(Effect.catchAll(() => Effect.succeed({ id: -1, name: "Default User" })))
+  const all = yield* userRepository.findAll()
+
+  console.log("user1", user1)
+  console.log("all", all)
 })
 
-Effect.runSync(
-  program.pipe(
-    Effect.provideService(UserRepository, userRepositoryLive),
-    Effect.provideService(UserService, userServiceLive)
-  )
-)
+Effect.runSync(main.pipe(Effect.provideService(UserRepository, userLocalStorageRepositoryLive)))
