@@ -48,8 +48,8 @@ class LocalStorageError extends Error {
 class UserRepository extends Context.Tag("UserRepository")<
   UserRepository,
   {
-    findById: (id: number) => Effect.Effect<User, UserRepositoryError>
-    findAll: () => Effect.Effect<Array<User>, UserRepositoryError>
+    findById: (id: number) => Effect.Effect<User | undefined, UserRepositoryError, never>
+    findAll: () => Effect.Effect<Array<User>, UserRepositoryError, never>
   }
 >() {}
 
@@ -99,10 +99,6 @@ const userInmemoryRepositoryLive = UserRepository.of({
   findAll: () => Effect.succeed(users),
   findById: (id) => {
     const user = users.find((user) => user.id === id)
-    if (!user) {
-      return Effect.fail(UserRepositoryError.NotFound(id))
-    }
-
     return Effect.succeed(user)
   }
 })
@@ -115,17 +111,8 @@ const userLocalStorageRepositoryLive = UserRepository.of({
         .getItem<Array<User>>("users")
         .pipe(Effect.catchAll(() => Effect.succeed([])))
 
-      return users
-    }).pipe(
-      Effect.flatMap((users) => {
-        const user = users.find((user) => user.id === id)
-        if (!user) {
-          return Effect.fail(UserRepositoryError.NotFound(id))
-        }
-        return Effect.succeed(user)
-      }),
-      Effect.provideService(LocalStorageService, localStorageServiceLive)
-    )
+      return users.find((user) => user.id === id)
+    }).pipe(Effect.provideService(LocalStorageService, localStorageServiceLive))
   },
   findAll: () => {
     return Effect.gen(function* () {
@@ -142,12 +129,12 @@ const userLocalStorageRepositoryLive = UserRepository.of({
 const main = Effect.gen(function* () {
   const userRepository = yield* UserRepository
 
-  const user1 = yield* userRepository
-    .findById(1)
-    .pipe(Effect.catchAll(() => Effect.succeed({ id: -1, name: "Default User" })))
+  const userWithError = yield* userRepository.findById(1)
+  const user2 = yield* userRepository.findById(2)
   const all = yield* userRepository.findAll()
 
-  console.log("user1", user1)
+  console.log("user1", userWithError)
+  console.log("user2", user2)
   console.log("all", all)
 })
 
